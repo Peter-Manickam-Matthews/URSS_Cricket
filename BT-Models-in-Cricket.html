@@ -200,7 +200,7 @@ library(hyper2)
 </div>
 <div id="data" class="section level2">
 <h2>Data</h2>
-<p>The ODI Matches folder - downloaded from <a href="https://cricsheet.org/downloads/" class="uri">https://cricsheet.org/downloads/</a> - contains a csv file for each ODI played after March 2004 (in folder &quot;O. In each row in each file corresponds to 1 ball in the match, with the following attributes - match_id, season, start_date, venue, innings, ball, batting_team, bowling_team, striker, non_striker, bowler, runs_off_bat, extras, wides, noballs, byes, legbyes, penalty, wicket_type, player_dismissed, other_wicket_type, other_player_dismissed. We only care about matches since 2018 and are interested in striker, bowler, runs_off_bat, wicket_type. For now ignore extras and run outs but I’ll keep innings and ball numbers to add as covariates later.</p>
+<p>The ODI Matches folder - downloaded from <a href="https://cricsheet.org/downloads/" class="uri">https://cricsheet.org/downloads/</a> - contains a csv file for each ODI played after March 2004 (Matches from 1st Jan 2018 are in “ODIs since 2018”). In each row in each file corresponds to 1 ball in the match, with the following attributes - match_id, season, start_date, venue, innings, ball, batting_team, bowling_team, striker, non_striker, bowler, runs_off_bat, extras, wides, noballs, byes, legbyes, penalty, wicket_type, player_dismissed, other_wicket_type, other_player_dismissed. We only care about matches since 2018 and are interested in striker, bowler, runs_off_bat, wicket_type. For now ignore extras and run outs but I’ll keep innings and ball numbers to add as covariates later.</p>
 <pre class="r"><code>files &lt;- fs::dir_ls(&quot;ODIs since 2018&quot;)
 files &lt;- map(files,
              function(path){
@@ -223,9 +223,9 @@ head(model_data)</code></pre>
 ## 5  BRM Taylor Shakib Al Hasan            0  FALSE       1  0.7
 ## 6  BRM Taylor Shakib Al Hasan            0  FALSE       1  0.8</code></pre>
 </div>
-<div id="fitting-the-first-sub-model" class="section level2">
-<h2>Fitting the First Sub-Model</h2>
-<p>Relatively easy thing to get started, will probably have to think of a better way of fitting runs model as Bradley Terry package can’t handle it well, but for now we can fit the wickets model as a simple BT with an order effect on bowlers (reflecting how hard it is to take a wicket, compared to just surviving one ball)</p>
+<div id="data-cleaning-for-first-model" class="section level2">
+<h2>Data Cleaning for First Model</h2>
+<p>Relatively easy thing to get started, for now we can fit the wickets model as a simple Bradley-Terry with an order effect on bowlers (reflecting how hard it is to take a wicket, compared to just surviving one ball)</p>
 <p>Here is a function to put the model data into the format that models can be fitted with. For the wicket model BradleyTerry2 “prefers” data to be summarised for each pair of batsman and bowler.</p>
 <pre class="r"><code>DataToBinomial &lt;- function(model_data){
   binom &lt;- model_data %&gt;% 
@@ -272,11 +272,14 @@ BTdata &lt;- DataToBinomial(model_data)</code></pre>
 }
 
 BTdata &lt;- add_prior(BTdata)</code></pre>
-<p>##First Wicket-Based Model</p>
-<p>The initial baby wicket model that just has an order effect for batting (otherwise it would be meaningless) and no other covariates. Can be done with BradleyTerry2 but will probably fit runs models with hyper2 or gnm. Takes about 3 mins to run on my laptop</p>
+</div>
+<div id="first-wicket-based-model" class="section level2">
+<h2>First Wicket-Based Model</h2>
+<p>The initial baby wicket model that just has an order effect <span class="math inline">\(\nu\)</span> for batting (otherwise it would be meaningless) and no other covariates. Can be done with BradleyTerry2 but will probably fit runs models with hyper2 or gnm. Takes about 3 mins to run on my laptop. The coefficients calculated are log-abilities</p>
+<p><span class="math display">\[logit(i\ survives\ j) = log(\nu) + log(\mu_{i}) - log(\lambda_{j}) \]</span> <span class="math display">\[P(i\ survives\ j) = \frac{\nu \mu_{i}}{\nu\mu_{i} + \lambda_{j}}\]</span></p>
 <pre class="r"><code>FirstWickModel &lt;- BTm(outcome = cbind(wickets, survivals), player1 = bowl, player2 = bat,
   data = BTdata, id = &quot;player&quot;, formula = ~ player + batting, refcat = &quot;Average&quot;)</code></pre>
-<p>Seems to give semi reasonable results, a lot of players who don’t bowl or bat that much rise to the tip so prior probably needs to bbe strengthened a bit. Batting “advantage” of 3.967 implies that the average batsman gets out to the average bowler once every 53 balls, which is pretty high but within the realms of what you would expect. Based on the results pretty sure the “average” bowler (log-score = 0) of this model is comparitively worse than the true average bowler of the data.</p>
+<p>Seems to give semi reasonable results, a lot of players who don’t bowl or bat that much rise to the tip so prior probably needs to bbe strengthened a bit. <span class="math inline">\(\nu \ = 3.967\)</span> implies that the average batsman gets out to the average bowler once every 53 balls, which is pretty high but within the realms of what you would expect. Based on the results pretty sure the “average” bowler (log-ability = 0) of this model is comparitively worse than the true average bowler of the data.</p>
 <pre class="r"><code>sort(FirstWickModel$coefficients, decreasing = T) ##need to figure out how to split into batting and bowling</code></pre>
 <pre><code>##                          batting            playerDJ Mitchell Bat 
 ##                      3.967145852                      1.447073819 

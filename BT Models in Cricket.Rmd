@@ -70,6 +70,7 @@ BTdata <- DataToBinomial(model_data)
 
 Function to add a prior, with each player having bowled 38 balls to and faced 38 balls from "Average" player, with 1 wicket and 37 survivals (average not out balls per wicket across the dataset). Adding this helps a lot with the stability of the first wicket model at least
 
+
 ```{r priors}
 add_prior <- function(model_data, wickets = 1, survivals = 37){
   ## There is gonna be a much nicer purr implementation for doing it but this works for now
@@ -97,23 +98,27 @@ add_prior <- function(model_data, wickets = 1, survivals = 37){
 
 BTdata <- add_prior(BTdata)
 ```
-## First Wicket-Based Model
+### First Wicket-Based Model
 
-The initial baby wicket model that just has an order effect for batting (otherwise it would be meaningless) and no other covariates. Can be done with BradleyTerry2 but will probably fit runs models with hyper2 or gnm. Takes about 3 mins to run on my laptop
+The initial baby wicket model that just has an order effect $\nu$ for batting (otherwise it would be meaningless) and no other covariates. Can be done with BradleyTerry2 but will probably fit runs models with hyper2 or gnm. Takes about 3 mins to run on my laptop. The coefficients calculated are log-abilities, so with $log(\mu_{i})$ as the batting ability of player i and $log(\lambda_{j})$ as the bowling ability of player j, the model is
+
+$$logit(i\ survives\ j) = log(\nu) + log(\mu_{i}) - log(\lambda_{j}) $$
+$$P(i\ survives\ j) = \frac{\nu \mu_{i}}{\nu\mu_{i} + \lambda_{j}}$$
+
 ```{r first_model}
 FirstWickModel <- BTm(outcome = cbind(wickets, survivals), player1 = bowl, player2 = bat,
   data = BTdata, id = "player", formula = ~ player + batting, refcat = "Average")
 ```
-Seems to give semi reasonable results, a lot of players who don't bowl or bat that much rise to the tip so prior probably needs to bbe strengthened a bit. Batting "advantage" of 3.967 implies that the average batsman gets out to the average bowler once every 53 balls, which is pretty high but within the realms of what you would expect. Based on the results pretty sure the "average" bowler (log-score = 0) of this model is comparitively worse than the true average bowler of the data. 
+Seems to give semi reasonable results, a lot of players who don't bowl or bat that much rise to the tip so prior probably needs to be strengthened a bit. $log(\nu) \ = 3.967$ implies that the average batsman gets out to the average bowler once every 53 balls, which is pretty high but within the realms of what you would expect. Based on the results pretty sure the "average" bowler (log-ability = 0) of this model is comparitively worse than the true average bowler of the data. 
 ```{r results}
 sort(FirstWickModel$coefficients, decreasing = T) ##need to figure out how to split into batting and bowling
 ```
 How long would Joe Root survive against himself?
 ```{r Root}
-batadvantage = 3.967145852
+nu = 3.967145852
 bowl = 0.629774970
 bat = 0.550226006  ##had to manually look these up because R doesn't like indexing things with spaces, need to fix.
 
 ## 1 / Probability of getting out each ball
-1 + exp(batadvantage + bat - bowl)
+1 + exp(nu + bat - bowl)
 ```
