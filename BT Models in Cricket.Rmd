@@ -35,6 +35,8 @@ files <- map(files,
 full_data <- bind_rows(files)
 model_data <- filter(full_data, extras == 0, wicket_type != "run out") ## Ignore balls with runs not credited to batsman and wickets not credited to bowler
 model_data$wicket <- model_data$wicket_type != ""
+#for innings phase
+
 
 model_data <- model_data %>% select(striker, bowler, runs_off_bat, wicket, innings, ball) ##keeping innings and ball numbers as covariates later, when that happens will have to process them more here
 
@@ -103,14 +105,14 @@ BTdata <- add_prior(BTdata)
 The initial baby wicket model that just has an order effect $\nu$ for batting (otherwise it would be meaningless) and no other covariates. Can be done with BradleyTerry2 but will probably fit runs models with hyper2 or gnm. Takes about 3 mins to run on my laptop. The coefficients calculated are log-abilities, so with $log(\mu_{i})$ as the batting ability of player i and $log(\lambda_{j})$ as the bowling ability of player j, the model is
 
 $$logit(i\ survives\ j) = log(\nu) + log(\mu_{i}) - log(\lambda_{j}) $$
-$$P(i\ survives\ j) = \frac{\nu \mu_{i}}{\nu\mu_{i} + \lambda_{j}}$$
+$$\mathbb{P}(i\ survives\ j) = \frac{\nu \mu_{i}}{\nu\mu_{i} + \lambda_{j}}$$
 
-```{r first_model}
+```{r first_model, eval=FALSE}
 FirstWickModel <- BTm(outcome = cbind(wickets, survivals), player1 = bowl, player2 = bat,
-  data = BTdata, id = "player", formula = ~ player + batting, refcat = "Average")
+data = BTdata, id = "player", formula = ~ player + batting, refcat = "Average")
 ```
 Seems to give semi reasonable results, a lot of players who don't bowl or bat that much rise to the tip so prior probably needs to be strengthened a bit. $log(\nu) \ = 3.967$ implies that the average batsman gets out to the average bowler once every 53 balls, which is pretty high but within the realms of what you would expect. Based on the results pretty sure the "average" bowler (log-ability = 0) of this model is comparitively worse than the true average bowler of the data. 
-```{r results}
+```{r results, eval=FALSE, echo=TRUE}
 sort(FirstWickModel$coefficients, decreasing = T) ##need to figure out how to split into batting and bowling
 ```
 How long would Joe Root survive against himself?
@@ -121,4 +123,130 @@ bat = 0.550226006  ##had to manually look these up because R doesn't like indexi
 
 ## 1 / Probability of getting out each ball
 1 + exp(nu + bat - bowl)
+```
+
+## Wickets model with phase of match
+
+This model will split each innings into 10 over blocks as factors, (e.g. 1st Inn Overs 1-10, 1st Inn Overs 11-20, ... , 2nd Inn Overs 41-50). There is a separate effect $\nu_{k}$ for each phase of the match, k. So the model becomes
+
+$$logit(i\ survives\ j \mid  phase\ k) = log(\nu_{k}) + log(\mu_{i}) - log(\lambda_{j}) $$
+$$\mathbb{P}(i\ survives\ j \mid  phase\ k) = \frac{\nu_{k} \mu_{i}}{\nu_{k} \mu_{i} + \lambda_{j}}$$
+
+```{r wicket_model_2_data}
+DataToModel2 <- function(model_data){
+  eligbowl <- model_data %>%                      ##filter for bowlers who have balled more than 150 balls
+    group_by(bowler) %>%
+    summarise(wickets = sum(wicket), survivals = sum(!wicket)) %>%
+    filter(wickets + survivals > 150)
+  
+  eligbat <- model_data %>%                     ## and batsmen who have faced more than 150
+    group_by(striker) %>%
+    summarise(wickets = sum(wicket), survivals = sum(!wicket)) %>%
+    filter(wickets + survivals > 150)
+  
+  output <- model_data %>% filter(bowler %in% eligbowl$bowler & striker %in% eligbat$striker)
+  output$phase <- output$ball %/% 10 + 5*(output$innings - 1) + 1
+  
+  output <- output %>%                     ## and batsmen who have faced more than 150
+    group_by(bowler, striker, phase) %>%
+    summarise(wickets = sum(wicket), survivals = sum(!wicket))
+
+  output$bowler <- paste(output$bowler, "Bowl")
+  output$striker <- paste(output$striker, "Bat")
+  output$ball <- factor(output$bowler, levels = unique(c(output$bowler, output$striker, "Average")))
+  output$bat <- factor(output$striker, levels = unique(c(output$bowler, output$striker, "Average")))
+  output$ball <- data.frame(player = output$ball, p11 = 0, p12 = 0, p13 = 0, p14 = 0, p15 = 0, p21 = 0, p22 = 0, p23 = 0, p24 = 0, p25 = 0)
+  
+  
+  output$bat <- data.frame(player = output$bat, "p11" = as.numeric(output$phase == 1), "p12" = as.numeric(output$phase == 2), "p13" = as.numeric(output$phase == 3), "p14" = as.numeric(output$phase == 4), "p15" = as.numeric(output$phase == 5), "p21" = as.numeric(output$phase == 6), "p22" = as.numeric(output$phase == 7), "p23" = as.numeric(output$phase == 8), "p24" = as.numeric(output$phase == 9), "p25" = as.numeric(output$phase == 10))
+  ## absolutely disgusting implementation, will try to find a better one
+  
+  output <- output %>% select(ball, bat, wickets, survivals)
+  return(output)
+}
+
+M2Data <- DataToModel2(model_data)
+
+```
+Have to also set up a prior.
+```{r prior 2}
+add_prior2 <- function(model_data, wickets = 2, survivals = 75){
+  ## There is gonna be a much nicer purr implementation for doing it but this works for now
+  bowl.prior = model_data[1: length(unique(model_data$ball$player)),] ## creates a dataframe the right size to add stuff to.
+  bat.prior = model_data[1: length(unique(model_data$bat$player)), ]
+  
+  bowl.prior$ball$player = unique(model_data$ball$player)
+  
+  bowl.prior$bat$player = factor("Average")
+  bowl.prior$bat$p11 = 1
+  bowl.prior$bat$p12 = 0
+  bowl.prior$bat$p13 = 0
+  bowl.prior$bat$p14 = 0
+  bowl.prior$bat$p15 = 0
+  bowl.prior$bat$p21 = 0
+  bowl.prior$bat$p22 = 0
+  bowl.prior$bat$p23 = 0
+  bowl.prior$bat$p24 = 0
+  bowl.prior$bat$p25 = 0
+  bowl.prior$wickets = wickets
+  bowl.prior$survivals = survivals
+  
+  bat.prior$bat$player = unique(model_data$bat$player)
+  bat.prior$ball$player = factor("Average")
+
+  bat.prior$bat$p11 = 1
+  bat.prior$bat$p12 = 0
+  bat.prior$bat$p13 = 0
+  bat.prior$bat$p14 = 0
+  bat.prior$bat$p15 = 0
+  bat.prior$bat$p21 = 0
+  bat.prior$bat$p22 = 0
+  bat.prior$bat$p23 = 0
+  bat.prior$bat$p24 = 0
+  bat.prior$bat$p25 = 0
+  bat.prior$wickets = wickets
+  bat.prior$survivals = survivals
+  
+  output = bind_rows(model_data, bat.prior, bowl.prior)
+  return(output)
+}
+
+M2Data1 <- add_prior2(M2Data)
+```
+
+```{r 2ndwik_model}
+WickModel2 <- BTm(outcome = cbind(wickets, survivals), player1 = ball, player2 = bat,
+data = M2Data1, id = "player", formula = ~ player + p11 + p12 + p13 + p14 + p15 + p21 + p22 + p23 + p24 + p25, refcat = "Average", start = c(rep(0, 477), rep(3.75, 10)))
+```
+So we then want to renormalise the estimated coefficients such that the average bating ability and average bowling ability are both 0, we can adjust $\nu_{k}$  estimates to compensate. Then we look $\nu_{k}$ estimates to see how they vary by match phase.
+
+```{r normalisation and investigation of nu}
+bowlers <- WickModel2$coefficients[str_detect(names(WickModel2$coefficients), "Bowl")]
+batters <- WickModel2$coefficients[str_detect(names(WickModel2$coefficients), "Bat")]
+nus <- WickModel2$coefficients[str_detect(names(WickModel2$coefficients), "player", negate = T)]
+
+nus <- nus + mean(batters) - mean(bowlers)
+bowlers <- bowlers - mean(bowlers)
+batters <- batters - mean(batters)
+
+nu.df <- data.frame(phase = c("1-10", "11-20", "21-30", "31-40", "41-50"), "1st Inning" = nus[1:5], "2nd Inning" = nus[6:10])
+
+barplot(t(as.matrix(nu.df[ , 2:3])), beside = T, names.arg = nu.df$phase, main = bquote("Estimate of log(" ~ nu[k] ~ ") at each phase of the innings"), xlab = "Overs", ylab = bquote("log(" ~ nu[k] ~ ")") , col = c("#24478f", "#009999"))
+legend(12.2, 4, legend = c("1st Innings", "2nd Innings"), fill = c("#24478f", "#009999"))
+```
+As expected, the parameter estimates are mostly constant at the start of the innings and decrease towards the end, suggesting that batting is more dangerous at the end of the innings.
+Furthermore we can look at the parameter estimates for players to look at the top batsmen and bowlers as implied by the model
+```{r 2ndwik_model_player_rank, echo=F}
+bat.df = data.frame(player = str_remove(names(batters), "player"), ability = batters)
+bowl.df = data.frame(player = str_remove(names(bowlers), "player"), ability = bowlers)
+bat.df <- bat.df[order(bat.df$ability, decreasing = T), ]
+bowl.df <- bowl.df[order(bowl.df$ability, decreasing = T), ]
+rownames(bat.df) <- 1:length(batters)
+rownames(bowl.df) <- 1:length(bowlers)
+
+rmarkdown::paged_table(head(bat.df, 10))
+```
+```{r 2ndwik_model_player_rank 2, echo=F}
+
+rmarkdown::paged_table(head(bowl.df, 10))
 ```
