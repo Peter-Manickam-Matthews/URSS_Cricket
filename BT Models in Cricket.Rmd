@@ -2,7 +2,9 @@
 title: 'URSS: Bradley-Terry Models in Cricket'
 author: "Peter Matthews"
 date: "07/07/2021"
-output: html_document
+output: 
+      html_document: default
+#     pdf_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -10,12 +12,13 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ## Introduction
-Write this bit up later. For now import tidyverse, fs to deal with files, and hyper2 to construct and optimise liklihood-functions, BradleyTerry2 for fitting basic Bradley-Terry models. 
+This project aims to investigate the Bradley-Terry class of models for pairwise comparisons, and to apply them to cricket. I aim to formulate and fit a model - using ball-by-ball data in ODI matches from 2018 to 2021 - that estimates the wicket-taking ability of each bowler and the wicket-saving ability of each batsman, and to formulate another model that estimates the run-scoring and run-saving ability of each batsman and bowler, respectively. Some cricket-specific extensions of the models I look at are to account for the different ease of taking wickets and scoring runs at various stages of the match; *incorporating home advantage; comparing a batsman's ability against seam vs against spin; allowing for abilities to vary smoothly over time; and allowing player abilities to vary in each venue*. The primary application I'm interested in are to form rankings of cricket players in a more principled manner to the [ICC's official rankings](https://www.icc-cricket.com/rankings/mens/player-rankings/odi), The paradigm can be used also to optimise the players to come in at each situation.
+Import the packages needed for the project: tidyverse; fs to deal with files; BradleyTerry2 and gnm for fitting Bradley-Terry models. 
 ```{r imports, collapse=TRUE, warning=FALSE}
 library(tidyverse)
 library(fs)
 library(BradleyTerry2)
-library(hyper2)
+library(gnm)
 ```
 
 ## Data
@@ -28,10 +31,12 @@ We only care about matches since 2018 and are interested in striker, bowler, run
 files <- fs::dir_ls("ODIs since 2018")
 files <- map(files,
              function(path){
-               read.csv(path, 
+               match <- read.csv(path, 
                         colClasses = c("numeric", "character", "Date", "character",	"numeric",	"numeric",	"character",	"character",	"character",	"character",	"character",	"integer",	"integer",	"integer",	"integer",	"integer",	"integer",	"integer",	"character",	"character",	"character",	"character"
-)) ## have to specify classes so that R can correctly bind rows
-               })
+))
+  match$bowler <- paste(match$bowler, "Bowl")
+  match$striker <- paste(match$striker, "Bat")## have to specify classes so that R can correctly bind rows
+  return(match)             })
 full_data <- bind_rows(files)
 model_data <- filter(full_data, extras == 0, wicket_type != "run out") ## Ignore balls with runs not credited to batsman and wickets not credited to bowler
 model_data$wicket <- model_data$wicket_type != ""
@@ -39,6 +44,18 @@ model_data$wicket <- model_data$wicket_type != ""
 
 
 model_data <- model_data %>% select(striker, bowler, runs_off_bat, wicket, innings, ball) ##keeping innings and ball numbers as covariates later, when that happens will have to process them more here
+eligbowl <- model_data %>%                      ##filter for bowlers who have balled more than 150 balls
+    group_by(bowler) %>%
+    summarise(wickets = sum(wicket), survivals = sum(!wicket)) %>%
+    filter(wickets > 10 & survivals > 250)
+  
+eligbat <- model_data %>%                     ## and batsmen who have faced more than 150
+    group_by(striker) %>%
+    summarise(wickets = sum(wicket), survivals = sum(!wicket)) %>%
+    filter(wickets > 10 & survivals > 250)
+  
+output <- model_data %>% filter(bowler %in% eligbowl$bowler & striker %in% eligbat$striker)
+
 
 head(model_data)
 ```
@@ -56,8 +73,6 @@ DataToBinomial <- function(model_data){
     summarise(wickets = sum(wicket), survivals = sum(!wicket))
   
   ## after this point could be reused when including covariates (need to change first part to group table differently)
-  binom$bowler <- paste(binom$bowler, "Bowl")
-  binom$striker <- paste(binom$striker, "Bat")
   binom$bowl <- factor(binom$bowler, levels = unique(c(binom$bowler, binom$striker, "Average")))
   binom$bat <- factor(binom$striker, levels = unique(c(binom$bowler, binom$striker, "Average")))
   binom$bowl <- data.frame(player = binom$bowl, batting = 0)
@@ -70,7 +85,7 @@ BTdata <- DataToBinomial(model_data)
 
 ```
 
-Function to add a prior, with each player having bowled 38 balls to and faced 38 balls from "Average" player, with 1 wicket and 37 survivals (average not out balls per wicket across the dataset). Adding this helps a lot with the stability of the first wicket model at least
+Function to add a prior, with each player having bowled 38 balls to and faced 38 balls from "Average" player, with 1 wicket and 37 survivals (average not out balls per wicket across the dataset). Adding this made the model a lot more stable.
 
 
 ```{r priors}
@@ -102,20 +117,21 @@ BTdata <- add_prior(BTdata)
 ```
 ### First Wicket-Based Model
 
-The initial baby wicket model that just has an order effect $\nu$ for batting (otherwise it would be meaningless) and no other covariates. Can be done with BradleyTerry2 but will probably fit runs models with hyper2 or gnm. Takes about 3 mins to run on my laptop. The coefficients calculated are log-abilities, so with $log(\mu_{i})$ as the batting ability of player i and $log(\lambda_{j})$ as the bowling ability of player j, the model is
+The initial baby wicket model that just has an order effect $\nu$ for batting and no other covariates. Unlike the runs models it can be fitted just with BradleyTerry2, using maximum-likelihood-estimation and does not require gnm. Takes about 3 mins to run on my laptop. The coefficients calculated are log-abilities, so with $log(\mu_{i})$ as the batting ability of player i and $log(\lambda_{j})$ as the bowling ability of player j, the model is
 
 $$logit(i\ survives\ j) = log(\nu) + log(\mu_{i}) - log(\lambda_{j}) $$
 $$\mathbb{P}(i\ survives\ j) = \frac{\nu \mu_{i}}{\nu\mu_{i} + \lambda_{j}}$$
+
 
 ```{r first_model, eval=FALSE}
 FirstWickModel <- BTm(outcome = cbind(wickets, survivals), player1 = bowl, player2 = bat,
 data = BTdata, id = "player", formula = ~ player + batting, refcat = "Average")
 ```
-Seems to give semi reasonable results, a lot of players who don't bowl or bat that much rise to the tip so prior probably needs to be strengthened a bit. $log(\nu) \ = 3.967$ implies that the average batsman gets out to the average bowler once every 53 balls, which is pretty high but within the realms of what you would expect. Based on the results pretty sure the "average" bowler (log-ability = 0) of this model is comparitively worse than the true average bowler of the data. 
+The model seems to give semi reasonable results, a lot of players who don't bowl or bat that much rise to the tip so prior probably needs to be strengthened a bit. $log(\nu) \ = 3.967$ implies that the average batsman gets out to the average bowler once every 53 balls, which is pretty high but within the realms of what you would expect. Based on the results pretty sure the "average" bowler (log-ability = 0) of this model is comparitively worse than the true average bowler of the data. 
 ```{r results, eval=FALSE, echo=TRUE}
 sort(FirstWickModel$coefficients, decreasing = T) ##need to figure out how to split into batting and bowling
 ```
-How long would Joe Root survive against himself?
+A hypothetical you could ask the model is long would Joe Root survive against himself?
 ```{r Root}
 nu = 3.967145852
 bowl = 0.629774970
@@ -127,22 +143,24 @@ bat = 0.550226006  ##had to manually look these up because R doesn't like indexi
 
 ## Wickets model with phase of match
 
-This model will split each innings into 10 over blocks as factors, (e.g. 1st Inn Overs 1-10, 1st Inn Overs 11-20, ... , 2nd Inn Overs 41-50). There is a separate effect $\nu_{k}$ for each phase of the match, k. So the model becomes
+The first extension to the model will split each innings into 10 over blocks as factors, (e.g. 1st Inn Overs 1-10, 1st Inn Overs 11-20, ... , 2nd Inn Overs 41-50). There is a separate batting effect $\nu_{k}$ for each phase of the match, k. So the model becomes
 
 $$logit(i\ survives\ j \mid  phase\ k) = log(\nu_{k}) + log(\mu_{i}) - log(\lambda_{j}) $$
 $$\mathbb{P}(i\ survives\ j \mid  phase\ k) = \frac{\nu_{k} \mu_{i}}{\nu_{k} \mu_{i} + \lambda_{j}}$$
+
+Below are functions to fit the second model.
 
 ```{r wicket_model_2_data}
 DataToModel2 <- function(model_data){
   eligbowl <- model_data %>%                      ##filter for bowlers who have balled more than 150 balls
     group_by(bowler) %>%
     summarise(wickets = sum(wicket), survivals = sum(!wicket)) %>%
-    filter(wickets + survivals > 150)
+    filter(wickets > 10 & survivals > 150)
   
   eligbat <- model_data %>%                     ## and batsmen who have faced more than 150
     group_by(striker) %>%
     summarise(wickets = sum(wicket), survivals = sum(!wicket)) %>%
-    filter(wickets + survivals > 150)
+    filter(wickets > 10 & survivals > 150)
   
   output <- model_data %>% filter(bowler %in% eligbowl$bowler & striker %in% eligbat$striker)
   output$phase <- output$ball %/% 10 + 5*(output$innings - 1) + 1
@@ -151,8 +169,6 @@ DataToModel2 <- function(model_data){
     group_by(bowler, striker, phase) %>%
     summarise(wickets = sum(wicket), survivals = sum(!wicket))
 
-  output$bowler <- paste(output$bowler, "Bowl")
-  output$striker <- paste(output$striker, "Bat")
   output$ball <- factor(output$bowler, levels = unique(c(output$bowler, output$striker, "Average")))
   output$bat <- factor(output$striker, levels = unique(c(output$bowler, output$striker, "Average")))
   output$ball <- data.frame(player = output$ball, p11 = 0, p12 = 0, p13 = 0, p14 = 0, p15 = 0, p21 = 0, p22 = 0, p23 = 0, p24 = 0, p25 = 0)
@@ -216,9 +232,9 @@ M2Data1 <- add_prior2(M2Data)
 
 ```{r 2ndwik_model}
 WickModel2 <- BTm(outcome = cbind(wickets, survivals), player1 = ball, player2 = bat,
-data = M2Data1, id = "player", formula = ~ player + p11 + p12 + p13 + p14 + p15 + p21 + p22 + p23 + p24 + p25, refcat = "Average", start = c(rep(0, 477), rep(3.75, 10)))
+data = M2Data1, id = "player", formula = ~ player + p11 + p12 + p13 + p14 + p15 + p21 + p22 + p23 + p24 + p25, refcat = "Average")
 ```
-So we then want to renormalise the estimated coefficients such that the average bating ability and average bowling ability are both 0, we can adjust $\nu_{k}$  estimates to compensate. Then we look $\nu_{k}$ estimates to see how they vary by match phase.
+We re-normalise the estimated coefficients such that the average bating ability and average bowling ability are both 0, we can adjust $\nu_{k}$  estimates to compensate. Then we look $\nu_{k}$ estimates to see how they vary by match phase.
 
 ```{r normalisation and investigation of nu}
 bowlers <- WickModel2$coefficients[str_detect(names(WickModel2$coefficients), "Bowl")]
@@ -234,6 +250,7 @@ nu.df <- data.frame(phase = c("1-10", "11-20", "21-30", "31-40", "41-50"), "1st 
 barplot(t(as.matrix(nu.df[ , 2:3])), beside = T, names.arg = nu.df$phase, main = bquote("Estimate of log(" ~ nu[k] ~ ") at each phase of the innings"), xlab = "Overs", ylab = bquote("log(" ~ nu[k] ~ ")") , col = c("#24478f", "#009999"))
 legend(12.2, 4, legend = c("1st Innings", "2nd Innings"), fill = c("#24478f", "#009999"))
 ```
+
 As expected, the parameter estimates are mostly constant at the start of the innings and decrease towards the end, suggesting that batting is more dangerous at the end of the innings.
 Furthermore we can look at the parameter estimates for players to look at the top batsmen and bowlers as implied by the model
 ```{r 2ndwik_model_player_rank, echo=F}
@@ -249,4 +266,209 @@ rmarkdown::paged_table(head(bat.df, 10))
 ```{r 2ndwik_model_player_rank 2, echo=F}
 
 rmarkdown::paged_table(head(bowl.df, 10))
+```
+
+
+## Formulating a runs-model
+
+The runs model is formulated in a similar way to (Hamilton 2018). Where the probability of scoring n runs off one ball is proportional to the batting ability to the power of n and the bowling ability to the power of -n
+
+$$P(i\ scores \ 0 \ from \ j) \propto \nu_{0}$$
+$$P(i\ scores \ 1 \ from \ j) \propto \nu_{1} \left( {\frac{\mu_{i}}{\lambda_{j}}} \right)$$
+$$P(i\ scores \ 2 \ from \ j) \propto \nu_{2} \left( {\frac{\mu_{i}}{\lambda_{j}}} \right)^{2}$$
+$$ \ldots $$
+$$P(i\ scores \ k \ from \ j) \propto \nu_{k} \left( {\frac{\mu_{i}}{\lambda_{j}}} \right)^{k}$$
+
+where $\nu_{k}$ is a paramater that accounts for the relative likelihood of each run scoring outcome.
+
+If $N_{ijk}$ is the number of times that batsman i scores k runs off bowler j, then we also have
+
+$$log \left( \mathbb{E} \left[ N_{ijk} \right] \right) = log \left(\nu_{k}\right) + k \left[ log(\mu_{i}) - log(\lambda_{j}) \right] + a_{ij}$$
+
+where $a_{ij}$ is a nuisance parameter that accounts for both the denominator and the number of balls faced.
+
+So we can format it as a log-linear model and solve using gnm. For identifiability, $\nu_{0}$ is set to 1 and $\nu_{1}, \nu_{2}, \nu_{3}, \nu_{4}, \nu_{6}$ are calculated. Whilst technically possible scoring 5, or 7+ runs off a ball is vanishingly rare so they are ignored.
+
+
+This was my first attempt at fitting a runs model as an MLE from just the likelihood function, it takes way to long to run, hence the gnm implementation below. I'm keeping it here for posterity.
+```{r run model loglik}
+balllik <- function(params, data){
+  
+  bat = params["bat"]; one =params["one"]; two =params["two"]
+  three = params["three"]; four = params["four"]; six =params["six"]
+  
+  bat2 <- data$runs_off_bat * bat
+  dot <- as.numeric(data$runs_off_bat == 0)
+  one2 <- one * (data$runs_off_bat == 1)
+  two2 <- two * (data$runs_off_bat == 2)
+  three2 <- three * (data$runs_off_bat == 3)
+  four2 <- four * (data$runs_off_bat == 4)
+  six2 <- six * (data$runs_off_bat == 6)
+  
+  dif <- params[data$striker] - params[data$bowler]
+  
+  return(sum( data$runs_off_bat * dif
+          + bat2 + dot + one2 + two2 + three2 + four2 + six2 - 
+            log(1 + exp(one + bat + dif) + exp(two + 2 * (bat + dif))
+           + exp(three + 3 * (bat + dif)) + exp(four + 4 * (bat + dif))
+           + exp(six + 6 * (bat + dif))
+                )))
+}
+
+ab0 <- numeric(length(unique(c(model_data$bowler, model_data$striker))) + 6)
+names(ab0) <- c(unique(c(model_data$bowler, model_data$striker)), "bat", "one", "two", "three", "four", "six")
+
+cnstrntl <- numeric(length(unique(c(model_data$bowler, model_data$striker))) + 6) - 4
+cnstrntl[1] = 0
+cnstrntl[length(cnstrntl) - 7] = 0
+cnstrntu = -1 * cnstrntl
+
+balllik(ab0, model_data)
+```
+```{r run model fit, eval = F}
+runmod <- optim(ab0, balllik, method = "L-BFGS-B", control=list('fnscale'=-1), upper = cnstrntu,  lower = cnstrntl, data = model_data)
+
+runmod
+
+```
+
+Here is the gnm implementation of the model that can be fit in a reasonable time (~10-15 mins). The first function creates a matrix where each column represents a players ability and each row vector is the contribution of each player to the model for that row of data. This (as shown above) is equal to the runs scored for the batter and runs conceeded for the bowler, with every other players contribution being zero. 
+
+```{r run model X}
+makePlayerMatrix <- function(data){
+  players <- unique(c(data$bowler, data$striker))
+  n <- length(players)
+  
+  X <- matrix(0,
+              nrow(data),
+              n)
+
+  colnames(X) <- players
+  for(player in colnames(X)){
+    X[data$bowler == player, player] = -1 * data$runs_off_bat[data$bowler == player]
+    X[data$striker == player, player] = data$runs_off_bat[data$striker == player]
+  }
+  return(X)
+}
+
+```
+
+This function formats the data in a way that can be fitted by gnm, an example of the format is shown below
+```{r run model clean}
+DataToRunMod <- function(data){
+  data <- select(data, -c(wicket, innings, ball))   ### drop the wickets for the runs model
+  data <- data[data$runs_off_bat != 5 & data$runs_off_bat != 7, ] ##drop 5s and 7s as they are incredibly rare
+  data <- expandCategorical(data, "runs_off_bat")
+  data$one = as.numeric(data$runs_off_bat == 1)
+  data$two = as.numeric(data$runs_off_bat == 2)
+  data$three = as.numeric(data$runs_off_bat == 3)
+  data$four = as.numeric(data$runs_off_bat == 4)
+  data$six = as.numeric(data$runs_off_bat == 6)
+  data$runs_off_bat = as.numeric(as.character(data$runs_off_bat))
+  data$Players = makePlayerMatrix(data)
+  return(data)
+}
+
+RunData <- DataToRunMod(model_data)
+
+rmarkdown::paged_table(head(RunData, 5))
+```
+
+Here, count is $N_{ijk}$ and id is a factor that can be fitted as the $a_{ij}$ parameter.
+
+```{r run model fit2}
+
+RunMod <- gnm(count ~  Players + one + two + three + four + six, eliminate = id, family = "poisson", data = RunData)
+```
+
+Then, like the wicket model we normalise the abilities and adjust the $nu_{k}$ to maintain the same predictions
+
+```{r run model normalise}
+
+battersRun <- RunMod$coefficients[str_detect(names(RunMod$coefficients), "Bat")]
+battersRun <- battersRun[!is.na(battersRun)]
+bowlersRun <- RunMod$coefficients[str_detect(names(RunMod$coefficients), "Bowl")]
+bowlersRun <- bowlersRun[!is.na(bowlersRun)]
+
+RunNus <- c(RunMod$coefficients["one"], RunMod$coefficients["two"], RunMod$coefficients["three"],
+            RunMod$coefficients["four"], RunMod$coefficients["six"])
+RunNus[is.na(RunNus)] = 0
+
+batAdvantage <- mean(battersRun) - mean(bowlersRun)
+for(i in 1:5){RunNus[i] = RunNus[i] + i * batAdvantage}
+RunNus["six"] <- RunNus["six"] + batAdvantage
+
+battersRun = battersRun - mean(battersRun)
+bowlersRun = bowlersRun - mean(bowlersRun)
+```
+
+```{r run_model_player_rank, echo=T}
+batr.df = data.frame(player = str_remove(names(battersRun), "Players"), ability = battersRun)
+bowlr.df = data.frame(player = str_remove(names(bowlersRun), "Players"), ability = bowlersRun)
+batr.df <- batr.df[order(batr.df$ability, decreasing = T), ]
+bowlr.df <- bowlr.df[order(bowlr.df$ability, decreasing = T), ]
+rownames(batr.df) <- 1:length(battersRun)
+rownames(bowlr.df) <- 1:length(bowlersRun)
+
+rmarkdown::paged_table(head(batr.df, 10))
+```
+
+```{r run_model_player_rank 2, echo=T}
+
+rmarkdown::paged_table(head(bowlr.df, 10))
+```
+
+```{r run_model_player_rank 3, echo=T}
+bowlabilities <- inner_join(bowl.df, bowlr.df, "player", suffix = c("wicket", "run"))
+batabilities <- inner_join(bat.df, batr.df, "player", suffix = c("wicket", "run"))
+
+```
+
+## Composite Measures
+
+2 measures combining the wicket and runs models are presented. One is a simple arithmetic mean of the log-abilities and the other (effAvg) is consistent with the Average as is usually formed in cricket.
+The wicket model gives $P(wicket)$ against an average (log-ability = 0) bowler/batter and the runs model can be used to calculate $\mathbb{E}(runs)$ against the average bowler/batter. Effective Average is then calculated as $\frac{\mathbb{E}(runs)}{P(wicket)}$. 
+
+```{r run_model_player_rank 4, echo=T}
+bowlabilities$probwicket <- 1 / (1 + exp(nus[1] - bowlabilities$abilitywicket))
+bowlabilities$xruns <- (exp(RunNus["one"] - bowlabilities$abilityrun)
+                        + 2 * exp(RunNus["two"] - 2* bowlabilities$abilityrun)
+                        + 3 * exp(RunNus["three"] - 3* bowlabilities$abilityrun)
+                        + 4 * exp(RunNus["four"] - 4* bowlabilities$abilityrun)
+                        + 6 * exp(RunNus["six"] - 6* bowlabilities$abilityrun))/
+                        (1 + exp(RunNus["one"] - bowlabilities$abilityrun)
+                        + exp(RunNus["two"] - 2* bowlabilities$abilityrun)
+                        + exp(RunNus["three"] - 3* bowlabilities$abilityrun)
+                        + exp(RunNus["four"] - 4* bowlabilities$abilityrun)
+                        + exp(RunNus["six"] - 6* bowlabilities$abilityrun))
+
+bowlabilities$effAvg <- bowlabilities$xruns / bowlabilities$probwicket
+
+bowlabilities <- bowlabilities[order(bowlabilities$effAvg, decreasing = F), ]
+rownames(bowlabilities) <- 1:length(bowlabilities$player)
+
+rmarkdown::paged_table(head(bowlabilities, 10))
+```
+
+```{r run_model_player_rank 5}
+batabilities$probwicket <- 1 / (1 + exp(nus[1] + batabilities$abilitywicket))
+batabilities$xruns <- (exp(RunNus["one"] + batabilities$abilityrun)
+                        + 2 * exp(RunNus["two"] + 2* batabilities$abilityrun)
+                        + 3 * exp(RunNus["three"] + 3* batabilities$abilityrun)
+                        + 4 * exp(RunNus["four"] + 4* batabilities$abilityrun)
+                        + 6 * exp(RunNus["six"] + 6* batabilities$abilityrun))/
+                        (1 + exp(RunNus["one"] + batabilities$abilityrun)
+                        + exp(RunNus["two"] + 2* batabilities$abilityrun)
+                        + exp(RunNus["three"] + 3* batabilities$abilityrun)
+                        + exp(RunNus["four"] + 4* batabilities$abilityrun)
+                        + exp(RunNus["six"] + 6* batabilities$abilityrun))
+
+batabilities$effAvg <- batabilities$xruns / batabilities$probwicket
+batabilities$averageability <- 0.5 * (batabilities$abilitywicket + batabilities$abilityrun)
+
+batabilities <- batabilities[order(batabilities$effAvg, decreasing = T), ]
+rownames(batabilities) <- 1:length(batabilities$player)
+
+
+rmarkdown::paged_table(head(batabilities, 10))
 ```
